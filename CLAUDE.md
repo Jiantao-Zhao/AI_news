@@ -40,9 +40,14 @@ YYYY-MM-DD/
 ├── report.md          # narrative summary in English — required
 ├── report_zh.md       # Chinese translation of report.md — required (user is a Chinese speaker)
 ├── papers/            # downloaded PDFs, named <firstAuthor><Year>_<slug>.pdf
+├── markdown/          # auto-derived from papers/ via the skill's pdf-to-markdown.py — required
+│   ├── _index.json    # one record per PDF: {pdf, md, n_figures, embedded, page_render, md_chars}
+│   └── <basename>/<basename>.md  + figures/  (1:1 with papers/<basename>.pdf)
 ├── raw/               # raw HTML/JSON snapshots, search result dumps, screenshots
 └── metadata.json      # optional: machine-readable index of papers/ entries
 ```
+
+After every download batch, the skill runs `pdf-to-markdown.py` (PyMuPDF + markitdown, in the skill's bundled `.venv`) so each PDF gets a paired markdown bundle with a figure-index table at the top. Read the bundle's `.md`, not the raw PDF, when grounding the report — it loads faster and the figure index is right at the top.
 
 **Both `report.md` and `report_zh.md` are required per run.** Keep them structurally parallel (same section headings, same paper ordering, same tables) so the user can cross-reference. Write each version idiomatically rather than as a literal translation — technical terms follow Chinese scientific convention (e.g. "扩散模型", "流变学逆向设计", "湿实验"), citations and file names stay in ASCII.
 

@@ -9,3 +9,11 @@
 
 # OS files
 .DS_Store
+
+# Python venvs (skill helpers create local venvs)
+.venv/
+__pycache__/
+*.pyc
+
+# Playwright MCP runtime cache (snapshots, console logs)
+.playwright-mcp/

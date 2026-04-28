@@ -5,7 +5,7 @@ description: Use when the user asks to find, download, or summarize recent AI-fo
 
 # AI4Science literature sweep
 
-One invocation produces one dated folder in the current working directory containing: a bilingual narrative summary report (English + Chinese, structurally parallel), primary-source PDFs downloaded end-to-end for every paper cited, structured bibliographic metadata, and a dedupe-aware record of what was covered. The skill is self-contained — everything needed to execute is in this file; the sibling files (`scope.md`, templates, JS helpers) are referenceable resources, not prerequisites.
+One invocation produces one dated folder in the current working directory containing: a bilingual narrative summary report (English + Chinese, structurally parallel), primary-source PDFs downloaded end-to-end for every paper cited, **markdown bundles automatically derived from each PDF (text + figure index + extracted images)**, structured bibliographic metadata, and a dedupe-aware record of what was covered. The skill is self-contained — everything needed to execute is in this file; the sibling files (`scope.md`, templates, JS helpers, `pdf-to-markdown.py`) are referenceable resources, not prerequisites.
 
 ## Output contract — non-negotiable
 
@@ -14,12 +14,17 @@ $PWD/YYYY-MM-DD/
 ├── report.md         English narrative — required
 ├── report_zh.md      Chinese narrative — required, structurally parallel to report.md
 ├── papers/           Downloaded PDFs, <FirstAuthor><Year>_<slug>.pdf, ASCII only
+├── markdown/         Auto-derived markdown bundles, one per PDF — required
+│   ├── _index.json   Per-PDF stats {pdf, md, n_figures, embedded, page_render, md_chars}
+│   └── <basename>/
+│       ├── <basename>.md       Figure index + page anchors + body text
+│       └── figures/            Embedded images + page-render PNGs (150 DPI fallback)
 └── raw/              Landing-page metadata JSON, full-text extraction JSON, search dumps
 ```
 
-`YYYY-MM-DD` = today's date in the user's local timezone. **Both report files are mandatory in every run.** Nothing goes in the root of `$PWD` — always nest under the dated folder. If any paper appears in `papers/` without grounded content in the report body, the run is incomplete.
+`YYYY-MM-DD` = today's date in the user's local timezone. **Every PDF in `papers/` must have a matching bundle in `markdown/<basename>/`.** Both report files are mandatory in every run. Nothing goes in the root of `$PWD` — always nest under the dated folder. If any paper appears in `papers/` without grounded content in the report body, the run is incomplete.
 
-## Workflow — 8 steps, in order
+## Workflow — 9 steps, in order
 
 1. **Load scope.** Read `scope.md` in this skill's directory for the four default priority areas (molecules / enzymes / soft materials / cross-cutting) and venue rankings. If `$PWD/.ai4science-scope.md` exists, it overrides.
 
@@ -30,7 +35,7 @@ $PWD/YYYY-MM-DD/
    ```
    Any search hit matching an ID in this set is skipped. Rotate angle between runs — if yesterday's §1 used a binder/peptide paper, today's §1 should find small-molecule work.
 
-3. **Create today's folder.** `mkdir -p $PWD/YYYY-MM-DD/papers $PWD/YYYY-MM-DD/raw`.
+3. **Create today's folder.** `mkdir -p $PWD/YYYY-MM-DD/papers $PWD/YYYY-MM-DD/raw $PWD/YYYY-MM-DD/markdown`.
 
 4. **Discover in parallel.** Issue **one WebSearch per priority area in a single assistant message** (four searches in one message, not sequential). Restrict to the current + previous calendar year. Rank candidates: peer-reviewed > preprint, primary research > review, novel target > benchmark retread.
 
@@ -73,25 +78,48 @@ $PWD/YYYY-MM-DD/
    ```
    Always `browser_close` at the end of a Playwright session.
 
-7. **Read every downloaded PDF before writing the report — no exceptions.** Use `Read` with `pages: "1-8"` (or more for long papers). The authoritative rule: every PDF in `papers/` must contribute paper-specific content to `report.md` — actual methods named in the paper, actual numerical results with units and context, actual limitations the authors flag. **Citation-row-only appearance is the defining grounding failure**: it means the narrative was built from search snippets, not from the literature that was downloaded. If time is short, download fewer PDFs — do not skip the read.
+7. **Convert every downloaded PDF to a markdown bundle — no exceptions.** Run the bundled helper once per sweep, after all PDFs are in `papers/`:
+   ```bash
+   ~/.claude/skills/ai4science-literature-sweep/.venv/bin/python \
+     ~/.claude/skills/ai4science-literature-sweep/pdf-to-markdown.py \
+     --out YYYY-MM-DD/markdown YYYY-MM-DD/papers
+   ```
+   The helper is **idempotent** — re-running on the same papers folder skips already-converted bundles unless `--force` is passed, so it's safe to invoke after every download or once at the end.
 
-8. **Write both reports in parallel structure.** Use `report-template.md` and `report-template-zh.md` as scaffolds. Four sections (one per priority area), each with "What the paper does / Verified numbers / Non-obvious observations / Limitations flagged by the authors". Translate idiomatically (use Chinese scientific convention: "扩散模型", "流变学逆向设计", "湿实验验证", "预印本", "基础模型"); keep authors, DOIs, arXiv IDs, filenames, URLs in ASCII. End with a "Reading-priority recommendation", a "Local downloads" table, and a "Caveats / known gaps" section.
+   What it produces (matches the structure verified on prior sweeps):
+   - `markdown/<basename>/<basename>.md` — header with embedded/rendered counts, figure index table, then full body text via markitdown
+   - `markdown/<basename>/figures/p<NN>_img<MM>.png` — every embedded image, exported via PyMuPDF `Pixmap` (CMYK → RGB auto-converted)
+   - `markdown/<basename>/figures/p<NN>_page-render.png` — full-page raster at 150 DPI for any page that has **zero embedded images but ≥ 50 vector drawing paths** (catches chart-heavy pages from Phys Rev / Nature where figures are vectors, not embedded bitmaps)
+   - `markdown/_index.json` — `{pdf, md, n_figures, embedded, page_render, md_chars}` per record
+
+   First-time setup on a new machine — the helper relies on a venv inside the skill directory (one-time cost, ~80 MB):
+   ```bash
+   cd ~/.claude/skills/ai4science-literature-sweep
+   uv venv .venv
+   uv pip install --python .venv/bin/python pymupdf 'markitdown[pdf]'
+   ```
+   If `uv` is unavailable, the same effect with stdlib + pip: `python3 -m venv .venv && .venv/bin/pip install pymupdf 'markitdown[pdf]'`.
+
+8. **Read every markdown bundle before writing the report — no exceptions.** Use `Read` on `markdown/<basename>/<basename>.md` (much faster + cleaner than reading the raw PDF — the helper has already done the OCR-equivalent work). Read pages 1–8 worth of content for short papers, more for reviews. The authoritative rule: every PDF in `papers/` must contribute paper-specific content to `report.md` — actual methods named in the paper, actual numerical results with units and context, actual limitations the authors flag. **Citation-row-only appearance is the defining grounding failure**: it means the narrative was built from search snippets, not from the literature that was downloaded. If time is short, download fewer PDFs — do not skip the read.
+
+9. **Write both reports in parallel structure.** Use `report-template.md` and `report-template-zh.md` as scaffolds. Four sections (one per priority area), each with "What the paper does / Verified numbers / Non-obvious observations / Limitations flagged by the authors". Translate idiomatically (use Chinese scientific convention: "扩散模型", "流变学逆向设计", "湿实验验证", "预印本", "基础模型"); keep authors, DOIs, arXiv IDs, filenames, URLs in ASCII. End with a "Reading-priority recommendation", a "Local downloads" table, and a "Caveats / known gaps" section.
 
 ## Grounding discipline — the load-bearing rule
 
 Every bullet in the narrative must be backed by one of these sources, in preference order:
-1. **The paper's own PDF read this run** — highest weight, always preferred.
-2. **The landing page's abstract or full-text extraction in `raw/`** — equivalent to reading the PDF for grounding purposes; cite the JSON file in the "Local downloads" table.
+1. **The paper's markdown bundle in `markdown/<basename>/`** (preferred since Step 7 is mandatory) — equivalent grounding to reading the PDF; faster to load with the `Read` tool.
+2. **The landing page's abstract or full-text extraction in `raw/`** — when only Path D applied (no PDF locally) — cite the JSON file in the "Local downloads" table.
 3. **WebSearch snippet** — allowed only for discovery pointers that lead to next-run targets; every such bullet must be tagged `[search-only, unverified]`.
 
-A claim about a specific numerical result (×-fold, % identity, compound count, capacity, Kd) must come from category 1 or 2. **Never laundrer a search-snippet number into the body without the tag.** When two similar-looking numbers come from different quantities (e.g. "16× activity gain" vs "90× substrate-preference ratio"), keep them syntactically distinct — they are different measurements, not synonyms.
+A claim about a specific numerical result (×-fold, % identity, compound count, capacity, Kd) must come from category 1 or 2. **Never launder a search-snippet number into the body without the tag.** When two similar-looking numbers come from different quantities (e.g. "16× activity gain" vs "90× substrate-preference ratio"), keep them syntactically distinct — they are different measurements, not synonyms.
 
 ## Filename discipline
 
 - PDFs: `<FirstAuthorLastName><Year>_<short-slug>.pdf`. ASCII only, no spaces, hyphens instead of underscores in the slug. Append `_preprint` for arXiv / bioRxiv / ChemRxiv. Example: `Singh2025_autonomous-enzyme-platform.pdf`, `Passaro2025_boltz2_preprint.pdf`.
+- Markdown bundles inherit `<basename>` from the PDF — never hand-rename them; the `pdf-to-markdown.py` helper derives the directory and `.md` filename from `Path.stem`.
 - Metadata JSON: `raw/<slug>_metadata.json`. Full-text JSON: `raw/<slug>_fulltext.json`.
 - Reports: always exactly `report.md` and `report_zh.md`. If content exceeds ~500 lines, split by topic (`report_molecules.md` + `report_molecules_zh.md`, etc.).
-- **First-author surname must come from the landing page** (Step 5). If the download happens before the metadata extraction, the filename is a guess — rename once the true author is known, before writing the report.
+- **First-author surname must come from the landing page** (Step 5). If the download happens before the metadata extraction, the filename is a guess — rename **the PDF** *before* running Step 7, otherwise the bundle directory inherits the wrong name. If you discover the wrong name only after running Step 7, rename both the PDF and the bundle directory, then update `markdown/_index.json` by re-running the helper with `--force`.
 
 ## Verification bar
 
@@ -119,13 +147,16 @@ When the user wants this on a recurring schedule, use `CronCreate` with a **self
 | "The first-author surname is probably '<X>' from the URL" | It almost certainly isn't. DOI / arXiv IDs are chronological. Read `citation_author[0]`. |
 | "curl returned 403 on bioRxiv, I'll skip this paper" | Expected behaviour — cf_clearance is httpOnly. Escalate to Path C; it works. |
 | "English report is enough for a quick run" | No. Both `report.md` and `report_zh.md` are required every run. |
-| "I can put today's output next to CLAUDE.md" | No. Nest under `YYYY-MM-DD/`. |
+| "I can skip pdf-to-markdown for this one paper, I'll just Read the PDF directly" | No. Step 7 is non-skippable: the bundle layout is what makes today's run scannable next month, and the figure-index table is a key grounding artifact. Run the helper. |
 | "Playwright is safer, I'll use it for arXiv too" | Wasted time. curl is faster; Playwright is only needed for JS-rendered pages and Cloudflare-protected PDFs. |
 | "This ×-fold claim is probably the same as the other ×-fold claim" | Often a different quantity (activity vs preference ratio, raw vs normalized). Keep them distinct. |
+| "I renamed the PDF after running the helper, the bundle name doesn't match anymore" | Re-run `pdf-to-markdown.py --force` after the rename. The helper is idempotent. |
 
 ## Red flags — STOP and fix before finishing
 
 - [ ] A paper's PDF is in `papers/` but the report body only mentions it in a citation or table row, with no paper-specific method / number / limitation in the narrative. **Top-priority failure mode.**
+- [ ] A paper's PDF is in `papers/` but no matching bundle exists in `markdown/<basename>/`. Run `pdf-to-markdown.py`.
+- [ ] `markdown/_index.json` records fewer entries than `papers/*.pdf` — Step 7 was skipped for some PDF.
 - [ ] `report_zh.md` doesn't exist or isn't structurally parallel to `report.md`.
 - [ ] Any numerical claim missing the in-silico-vs-wet-lab qualifier, or any search-only claim missing the `[search-only, unverified]` tag.
 - [ ] Any PDF filename with spaces, non-ASCII characters, or missing `<Author><Year>_` prefix.
@@ -138,7 +169,7 @@ When the user wants this on a recurring schedule, use `CronCreate` with a **self
 
 A four-paper sweep with mixed sources, following the full workflow:
 
-1. **Setup**: `mkdir -p 2026-04-24/papers 2026-04-24/raw`. Grep prior `*/report.md` for DOIs and arXiv IDs → dedupe set.
+1. **Setup**: `mkdir -p 2026-04-24/{papers,raw,markdown}`. Grep prior `*/report.md` for DOIs and arXiv IDs → dedupe set.
 2. **Parallel WebSearch** (one message, four tool calls): `"diffusion model small molecule drug discovery 2026 wet-lab validated"` / `"Boltz-2 protein structure affinity 2026 bioRxiv primary"` / `"shape memory polymer machine learning inverse design 2026 RSC"` / `"autonomous chemistry laboratory LLM agent 2026 primary"`. Pick one primary per area.
 3. **Metadata verification (Step 5)**: Playwright `browser_navigate` to the Nature Commun. landing page → `playwright-extract.js` → saves `raw/g2d-diff_metadata.json` → `authors[0]` = `"Kim, Hyunho"`. Filename locked in as `Kim2025_g2d-diff_cancer-small-mol.pdf`.
 4. **Downloads — mixed paths**:
@@ -147,12 +178,13 @@ A four-paper sweep with mixed sources, following the full workflow:
    - §4 ChatBattery: **Path A** (no UA needed). arXiv `https://arxiv.org/pdf/<id>`.
    - §2 Boltz-2: `curl` returns 403 on bioRxiv as expected. Escalate to **Path C** — navigate Playwright, wait 6 s for Cloudflare, `playwright-fetch-pdf.js` with `citation_pdf_url` from metadata, Python base64-decode, `file` sanity-check ("PDF document, version 1.5, 13 pages"), clean up intermediate JSON.
 5. **Close Playwright** after both bioRxiv fetches and the metadata extraction are done.
-6. **Read all four PDFs** with `Read` tool, `pages: "1-8"` each.
-7. **Write `report.md`** with four sections, each containing specific methods and numbers extracted from the PDFs (e.g. "Boltz-2's Pearson correlation ~0.65 on the 4-target FEP+ subset", "ChatBattery's NMC-SiMg delivers 174 mAh/g vs NMC811's 135 mAh/g"). Flag in-silico-only results (e.g. G2D-Diff TNBC candidates had docking + MoA analysis only, no wet-lab synthesis).
-8. **Write `report_zh.md`** with the same section structure, Chinese prose, ASCII citations.
-9. **Verify** both files exist, parallel section counts match, no PDF is citation-row-only, dedupe didn't re-cover a prior paper.
+6. **Run pdf-to-markdown.py** once on `2026-04-24/papers/` with `--out 2026-04-24/markdown`. Helper logs e.g. `[+] Passaro2025_boltz2_preprint.pdf  6 embedded + 2 rendered, md 78,400 chars`. Writes `markdown/_index.json` with one row per paper.
+7. **Read all four markdown bundles** with `Read` tool on `markdown/<basename>/<basename>.md`. Faster than reading the raw PDF + figure index is right at the top.
+8. **Write `report.md`** with four sections, each containing specific methods and numbers extracted from the bundles (e.g. "Boltz-2's Pearson correlation ~0.65 on the 4-target FEP+ subset", "ChatBattery's NMC-SiMg delivers 174 mAh/g vs NMC811's 135 mAh/g"). Flag in-silico-only results (e.g. G2D-Diff TNBC candidates had docking + MoA analysis only, no wet-lab synthesis).
+9. **Write `report_zh.md`** with the same section structure, Chinese prose, ASCII citations.
+10. **Verify** both reports exist, parallel section counts match, every PDF has a markdown bundle, no PDF is citation-row-only, dedupe didn't re-cover a prior paper.
 
-Total tool calls for a 4-paper run: ~4 WebSearches, ~4 Playwright navigations (combinable), ~4 `browser_evaluate`, ~4–8 Bash (curl + decode), ~4 `Read`, 2 `Write`. Runs in one conversation turn sequence without context blowup.
+Total tool calls for a 4-paper run: ~4 WebSearches, ~4 Playwright navigations (combinable), ~4 `browser_evaluate`, ~4–8 Bash (curl + decode + 1× pdf-to-markdown), ~4 `Read`, 2 `Write`. Runs in one conversation turn sequence without context blowup.
 
 ## File inventory — this skill's directory
 
@@ -164,3 +196,5 @@ Total tool calls for a 4-paper run: ~4 WebSearches, ~4 Playwright navigations (c
 | `report-template-zh.md` | Chinese report skeleton (structurally parallel). |
 | `playwright-extract.js` | Paste into `browser_evaluate` with `filename:` — extracts DOI/authors/abstract/pdf_url from Nature-family and similar landing pages. |
 | `playwright-fetch-pdf.js` | Paste into `browser_evaluate` with `filename:` — bioRxiv-compatible in-session PDF fetch with base64 return. Tested working. |
+| `pdf-to-markdown.py` | PyMuPDF + markitdown converter. Step 7 of the workflow. CLI: `--out OUT INPUT...` where INPUT is a PDF or directory. Idempotent; pass `--force` to redo. |
+| `.venv/` | Dedicated Python env for `pdf-to-markdown.py`. Contains pymupdf + markitdown. ~80 MB. Created once per machine, not committed across machines. |
